@@ -7,7 +7,6 @@ import threading
 import datetime
 import time
 import jwt
-import sys
 import paho.mqtt.client as mqtt
 
 class Spinner(object):
@@ -19,8 +18,44 @@ class Spinner(object):
         self.stop_running.set()
     def init_spin(self):
         while not self.stop_running.is_set():
-            sense.show_letter(next(self.spinners))
+            sense.show_letter(next(self.spinners), text_colour=color)
             time.sleep(0.08)
+
+def pushed_any(event):
+    global spinner, color, sense
+    if event.action == ACTION_PRESSED:
+        sense.show_letter("X")
+    if event.action == ACTION_RELEASED:
+        color = (0,0,255)
+        spinner = Spinner()
+        sense.stick.direction_any = None
+        connect()
+
+def connect():
+    global client, spinner, color
+    client = mqtt.Client(client_id=_CLIENT_ID)
+    client.username_pw_set(
+        username='whatever',
+        password=create_jwt())
+    client.on_connect = on_connect
+    client.on_disconnect=on_disconnect
+    client.on_message = on_message
+    client.tls_set(ca_certs=root_cert_filepath)
+    for i in range(3):
+        try:
+            client.connect('mqtt.googleapis.com', 8883)
+            client.loop_start()
+        except Exception as e:
+            spinner.stop()
+            sense.clear(255,0,0)
+            with open('/home/pi/GCP_Quick_Starts/telemetry.log', 'a+') as logf:
+                logf.write(str(datetime.datetime.now()) + "---" + str(e))
+            time.sleep(5)
+            color = (0,0,255)
+            spinner = Spinner()
+            continue
+        else:
+            break
 
 def create_jwt():
     cur_time = datetime.datetime.utcnow()
@@ -34,36 +69,24 @@ def create_jwt():
     return jwt.encode(token, private_key, ssl_algorithm)
 
 def on_connect(unusued_client, unused_userdata, unused_flags, rc):
-    global spinner, sense
-    spinner.stop()
-    sense.clear()
-    sense.stick.direction_any = pushed_any
-    print('on_connect ({}:{})'.format(rc, mqtt.error_string(rc)))
-
-def pushed_any(event):
-    global spinner, prev_temperature, sense
-    if event.action == ACTION_PRESSED:
-        sense.show_letter("X")
-    if event.action == ACTION_RELEASED:
-        sense.stick.direction_any = None
-        sense.clear()
-        spinner = Spinner()
-        curr_temperature = sense.get_temperature()
-        payload = '{{"ts":{}, "project_id":"{}", "gcp_location":"{}", "registryId":"{}", "deviceId":"{}", "curr_temperature":{}, "prev_temperature":{}}}'. \
-		            format(int(time.time()), project_id, gcp_location, registry_id, device_id, curr_temperature, prev_temperature)
-        print(payload)
-        client.publish(_MQTT_TELEMETRY_TOPIC, payload, qos=0)
-        prev_temperature = curr_temperature
-
-def on_publish():
-    print('on_publish')
+    global color, client, payload, prev_temperature
+    color = (0,255,0)
+    print(str(datetime.datetime.now()) + '--- on_connect ({}:{})'.format(rc, mqtt.error_string(rc)))
+    client.subscribe(_MQTT_COMMANDS_TOPIC, qos=0)
+    #client.subscribe(_MQTT_CONFIG_TOPIC, qos=0)
+    curr_temperature = sense.get_temperature()
+    payload = '{{"ts":{}, "project_id":"{}", "gcp_location":"{}", "registryId":"{}", "deviceId":"{}", "prev_temperature":"{}", "curr_temperature":"{}"}}'. \
+            format(int(time.time()), project_id, gcp_location, registry_id, device_id, prev_temperature, curr_temperature)
+    prev_temperature = curr_temperature
+    print('Publishing: ' + payload)
+    client.publish(_MQTT_TELEMETRY_TOPIC, payload, qos=0)
+    payload = None
 
 def on_message(unused_client, unused_userdata, message):
-    global spinner, sense
+    global spinner, sense, client
     spinner.stop()
-    sense.clear()
-    msg = message.payload.decode("utf-8")
-    print('Received message "{}" on topic "{}"\n'.format(msg, message.topic))
+    msg = message.payload.decode('utf-8')
+    print(str(datetime.datetime.now()) + ' --- Received message "{}" on topic "{}"'.format(msg, message.topic))
     if msg == 'red':
         sense.clear(255,0,0)
     elif msg == 'green':
@@ -74,15 +97,21 @@ def on_message(unused_client, unused_userdata, message):
         sense.show_letter('?')
     time.sleep(1)
     sense.clear()
+    client.disconnect()
+
+def on_disconnect(unused_client, unused_userdata, rc):
+    global client, sense
+    print(str(datetime.datetime.now()) + ' --- on_disconnect ({}:{})\n'.format(rc, mqtt.error_string(rc)))
+    client.loop_stop()
+    client = None
     sense.stick.direction_any = pushed_any
 
 sense = SenseHat()
 sense.low_light = True
-spinner = Spinner()
 
-ssl_private_key_filepath = '/home/pi/.ssh/######'
-ssl_algorithm = '######' # Either RS256 or ES256
-root_cert_filepath = '/home/pi/.ssh/roots.pem'
+ssl_private_key_filepath = '######'
+ssl_algorithm = 'RS256' # Either RS256 or ES256
+root_cert_filepath = '######'
 project_id = '######'
 gcp_location = '######'
 registry_id = '######'
@@ -95,29 +124,9 @@ _MQTT_CONFIG_TOPIC = '/devices/{}/config'.format(device_id)
 _MQTT_COMMANDS_TOPIC = '/devices/{}/commands/#'.format(device_id)
 
 prev_temperature = 0
-
-client = mqtt.Client(client_id=_CLIENT_ID)
-client.username_pw_set(
-    username='whatever',
-    password=create_jwt())
-client.on_connect = on_connect
-client.on_publish = on_publish
-client.on_message = on_message
-client.tls_set(ca_certs=root_cert_filepath)
-
-for i in range(3):
-    try:
-        client.connect('mqtt.googleapis.com', 8883)
-    except Exception as e:
-        spinner.stop()
-        sense.clear(255,0,0)
-        with open("/home/pi/######", "a+") as logf:
-            logf.write(datetime.datetime.utcnow() + "---" + str(e))
-        time.sleep(5)
-        continue
-    else:
-        #client.subscribe(_MQTT_CONFIG_TOPIC, qos=0)
-        client.subscribe(_MQTT_COMMANDS_TOPIC, qos=0)
-        client.loop_start()
-        pause()
-        #client.loop_stop()
+payload = None
+client = None
+spinner = None
+color = (0,0,255)
+sense.stick.direction_any = pushed_any
+pause()
