@@ -3,6 +3,6 @@
   "version": "0.0.1",
   "dependencies": {
     "@google-cloud/pubsub": "^0.18.0",
-    "googleapis": "^36.0.0"
+    "googleapis": "^59.0.0"
   }
 }
